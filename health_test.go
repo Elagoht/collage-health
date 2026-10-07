@@ -278,3 +278,31 @@ func TestDurationNanoseconds(t *testing.T) {
 
 // Compile-time: the plugin is told when a drain starts.
 var _ collage.DrainHook = health.New()
+
+// One Plugin value serves one App: a second App starting with it fails, rather
+// than inheriting the first App's drain and answering draining for good.
+func TestInit_SecondAppRefused(t *testing.T) {
+	p := health.New()
+	first := app(t, p, nil)
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := app(t, p, nil).Start()
+	if err == nil || !strings.Contains(err.Error(), "a Plugin value serves one App; create another with New") {
+		t.Fatalf("second App's Start: %v, want the one-App error", err)
+	}
+}
+
+// An Init that failed does not count: the value may be started again.
+func TestInit_RetryAfterFailedInit(t *testing.T) {
+	p := health.New()
+	bad := map[string]json.RawMessage{health.Name: json.RawMessage(`{"livePath":"nope"}`)}
+	if err := app(t, p, bad).Start(); err == nil {
+		t.Fatal("a livePath without a leading slash started")
+	}
+	h := site(t, p, nil)
+	expect(t, do(h, http.MethodGet, "/readyz"), http.StatusOK, "ok")
+}

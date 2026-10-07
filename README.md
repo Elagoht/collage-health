@@ -14,7 +14,7 @@ go get github.com/Elagoht/collage-health
 app, err := collage.New(&collage.Config{
 	Server: collage.ServerConfig{DrainDelay: 5 * time.Second, ShutdownTimeout: 10 * time.Second},
 	Plugins: []collage.Plugin{
-		health.New(), // first: nothing stands between a probe and its answer
+		health.New(), // before anything that can refuse or answer a request
 		basicauth.New(basicauth.Options{}),
 		ratelimit.New(ratelimit.Options{}),
 	},
@@ -24,19 +24,38 @@ app, err := collage.New(&collage.Config{
 Requires collage v0.53.0 or later, which tells plugins a drain has started
 (`collage.DrainHook`) and has `ServerConfig.DrainDelay`.
 
-## List it first
+## Where to list it
 
 Middleware runs in the order it was registered, the first outermost, and a plugin
 in `Config.Plugins` counts as registered where it is listed; all of them are
-outside the middleware the application adds with `app.Use`. List `elagoht/health`
-first in `Config.Plugins`, so a probe is answered before basicauth asks it for a
-password, ratelimit counts it, or fail2ban bans the probing address. A plugin added
-later with `app.RegisterPlugin` sits inside the middleware added before it, so it
-is not outermost there.
+outside the middleware the application adds with `app.Use`. A plugin added later
+with `app.RegisterPlugin` sits inside the middleware added before it.
 
-Plugins implementing `collage.RequestHook`, such as accesslog and otel, run before
-any middleware, so they still see every probe; filter the probe paths there if
-they are noise.
+**List `elagoht/health` before any plugin that can refuse or answer a request**,
+so a probe always reaches it:
+
+- **tenant** answers a host that is no tenant's with `404`. A kubelet probe
+  arrives with `Host: <pod IP>:<port>`, so with tenant listed before health,
+  liveness fails and Kubernetes restarts the pod in a loop.
+- **basicauth** asks a probe for a password, **ratelimit** counts and refuses it,
+  and **fail2ban**'s ban check refuses a banned address. Put fail2ban right after
+  health: a banned address getting `ok` from a probe endpoint is harmless.
+- **compress** may sit before health. It refuses nothing and only re-encodes a
+  body, and health rewrites no body, so its own "register it first" still holds.
+
+Who sees the probes, and the requests [load shedding](#load-shedding) refuses:
+
+- **accesslog** is middleware. Listed after health it logs neither a probe nor a
+  shed `503 overloaded`. List it before health if shed requests should be logged:
+  it refuses nothing, but it then logs the probes too. Its default `skip` covers
+  `/healthz` but not `/readyz`, so add the `readyPath` to `skip`.
+- **otel** and **fail2ban**'s counting implement `collage.RequestHook`, which runs
+  before any middleware, so they see every probe and every shed request wherever
+  health is listed.
+- **prometheus** sees them too, through collage's own response metrics, which
+  are recorded outside the middleware.
+
+Filter the probe paths there if they are noise.
 
 ## Endpoints
 
@@ -46,7 +65,9 @@ they are noise.
 | `/readyz` (`readyPath`) | `200 ok`; `503 unavailable` while a [check](#checks) fails; `503 draining` once a drain has started |
 
 Both answer `GET` and `HEAD` only, as `text/plain; charset=utf-8` (readiness as
-`application/json` with `details`) and with `Cache-Control: no-store`. Any other method gets `405` with `Allow: GET, HEAD`.
+`application/json` with `details`), with `Cache-Control: no-store` and with
+`X-Content-Type-Options: nosniff`, even where the application turns collage's own
+`nosniff` off. Any other method gets `405` with `Allow: GET, HEAD`.
 
 The middleware answers before routing, so the paths belong to the plugin:
 
@@ -60,6 +81,9 @@ The middleware answers before routing, so the paths belong to the plugin:
   middleware answers and it is never reached. A project scaffolded with the demos
   has a `/healthz` document; delete it, or move the liveness endpoint with
   `livePath`.
+- A shadowed document skews a static build too: the build asks the handler for
+  the document's file to capture its headers, and records health's
+  (`text/plain`, `no-store`) for it.
 
 ## Checks
 
@@ -84,8 +108,10 @@ Readiness is `503 unavailable` while any check fails. Liveness runs no checks.
   starting their own, so twenty probes at once run each check once, however
   short `cacheFor` is. A waiting probe whose own request ends gets
   `503 unavailable`.
-- **Never the error's text.** An error is logged with the check's name, and a
-  panic as well, through the application's logger. The response says only
+- **Never the error's text.** An error is logged at Warn with the check's name,
+  and a panic at Error, through the application's logger. That is once per run,
+  so a check that keeps failing logs once per `cacheFor` (a second by default)
+  for as long as it fails and probes keep coming. The response says only
   `unavailable`, or with `details` which check is `failing`.
 - **Not while draining.** Once a drain has started, readiness is `503 draining`
   and the checks are not run. A probe whose checks were running when the drain
@@ -99,6 +125,10 @@ at most one per `cacheFor`.
 
 `Check` panics on an empty name, a name already registered, a nil function, or a
 call after the application has started.
+
+A `Plugin` value serves one application. Starting a second application with the
+same value fails, since the value keeps the first one's drain and checks; build
+each with its own `health.New()`, in tests too.
 
 ### Details
 
@@ -189,11 +219,14 @@ overloaded
   handler returns, even when the handler panics. A long-lived response, such as
   a stream, keeps its slot for as long as it runs.
 
-Only requests that reach the plugin's middleware are counted. Listed first, that
-is every page, document, mount and handler request. Collage answers a few before
+Only requests that reach the plugin's middleware are counted. Listed before the
+plugins that answer requests, that is every page, document, mount and handler
+request. Collage answers a few before
 any middleware runs, and those are not counted: the development reload channel,
 and a request whose path needs cleaning, which gets a redirect or 404.
-`collage.RequestHook` plugins such as accesslog still see a refused request.
+A refused request is seen by `collage.RequestHook` plugins such as otel, and by
+accesslog only when it is listed before health; see
+[Where to list it](#where-to-list-it).
 
 ## Kubernetes
 
@@ -201,16 +234,17 @@ and a request whose path needs cleaning, which gets a redirect or 404.
 containers:
   - name: site
     readinessProbe:
-      httpGet: { path: /readyz, port: 3000 }
+      httpGet: { path: /readyz, port: 8080 }
       periodSeconds: 2
       failureThreshold: 1
     livenessProbe:
-      httpGet: { path: /healthz, port: 3000 }
+      httpGet: { path: /healthz, port: 8080 }
       periodSeconds: 10
       failureThreshold: 3
 terminationGracePeriodSeconds: 30
 ```
 
-With these probes, `DrainDelay: 5 * time.Second` covers the readiness probe's two
+Port 8080 is the one the Dockerfile `collage build -i` writes listens on. With
+these probes, `DrainDelay: 5 * time.Second` covers the readiness probe's two
 seconds with room to spare. Keep `terminationGracePeriodSeconds` above
 `DrainDelay + ShutdownTimeout`, or the pod is killed mid-shutdown.

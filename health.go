@@ -85,8 +85,12 @@ func (p *Plugin) Version() string { return version }
 
 // Init reads the configuration, applies the defaults, validates them, refuses an
 // endpoint path a page also claims, and adds the middleware that answers the
-// endpoints.
+// endpoints. A Plugin value serves one App: once an Init has succeeded, another
+// fails, since the value keeps that App's drain and checks.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
+	if p.inited.Load() {
+		return errors.New("elagoht/health: a Plugin value serves one App; create another with New")
+	}
 	opts, err := collage.PluginConfig(host, p.opts)
 	if err != nil {
 		return err

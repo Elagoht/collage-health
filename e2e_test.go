@@ -124,8 +124,8 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// Over a real server: during the drain readiness says draining and pages are
-// still served; once Shutdown returns the port is closed.
+// Over a real server: during the drain readiness says draining, liveness stays
+// ok and pages are still served; once Shutdown returns the port is closed.
 func TestE2E_DrainOverRealServer(t *testing.T) {
 	const drain = 2 * time.Second
 	port := freePort(t)
@@ -194,6 +194,10 @@ func TestE2E_DrainOverRealServer(t *testing.T) {
 	}
 	if code, body, err := get("/"); err != nil || code != http.StatusOK || body != "<main>home</main>" {
 		t.Fatalf("a page during the drain: %d %q %v, want 200", code, body, err)
+	}
+	// Liveness stays up: a drain is no reason to restart the process.
+	if code, body, err := get("/healthz"); err != nil || code != http.StatusOK || body != "ok" {
+		t.Fatalf("liveness during the drain: %d %q %v, want 200 ok", code, body, err)
 	}
 	if since := time.Since(start); since >= drain {
 		t.Fatalf("the drain checks took %s, past the %s drain: they did not run within it", since, drain)
