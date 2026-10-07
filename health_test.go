@@ -160,10 +160,54 @@ func TestInit_PathClaimedByPage(t *testing.T) {
 				t.Fatal("Start succeeded")
 			}
 			page := "page" + strings.ReplaceAll(path, "/", "-")
-			if !strings.Contains(err.Error(), "elagoht/health: ") || !strings.Contains(err.Error(), `page "`+page+`"`) {
+			if !strings.Contains(err.Error(), "elagoht/health: ") || !strings.Contains(err.Error(), `page "`+page+`"'s path (locale "en")`) {
 				t.Fatalf("error %q, want it to name page %q", err, page)
 			}
 		})
+	}
+}
+
+// refuseAll is a plugin whose middleware answers 401 to every request, as
+// basicauth does to a request without credentials.
+type refuseAll struct{}
+
+func (refuseAll) Name() string                   { return "test/refuseall" }
+func (refuseAll) Version() string                { return "0" }
+func (refuseAll) Shutdown(context.Context) error { return nil }
+func (refuseAll) Init(_ context.Context, host collage.Host) error {
+	return host.Use(func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+	})
+}
+
+// Listed first, the plugin answers probes before a plugin listed after it can
+// refuse them.
+func TestListedFirstAnswersBeforeLaterPlugins(t *testing.T) {
+	p := health.New()
+	a, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Logger: slog.New(slog.DiscardHandler),
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<main>home</main>`)},
+		}, Root: "t"},
+		Plugins: []collage.Plugin{p, refuseAll{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	h := a.Handler()
+	expect(t, do(h, http.MethodGet, "/healthz"), http.StatusOK, "ok")
+	expect(t, do(h, http.MethodGet, "/readyz"), http.StatusOK, "ok")
+	if rec := do(h, http.MethodGet, "/"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/: %d, want 401 from the later plugin", rec.Code)
 	}
 }
 

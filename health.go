@@ -102,10 +102,12 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		return err
 	}
 	for _, page := range host.Pages() {
-		for _, pattern := range page.Paths {
+		// Paths hold no locale prefix and Host cannot say which applies, so a
+		// page in any locale is refused.
+		for locale, pattern := range page.Paths {
 			for _, path := range []string{opts.LivePath, opts.ReadyPath} {
 				if pattern == path || strings.TrimSuffix(pattern, "/") == strings.TrimSuffix(path, "/") {
-					return fmt.Errorf("elagoht/health: %s is also page %q's path; the middleware answers first, so the page could never be reached", path, page.Name)
+					return fmt.Errorf("elagoht/health: %s is also page %q's path (locale %q); the endpoint would shadow it — move the endpoint with livePath/readyPath", path, page.Name, locale)
 				}
 			}
 		}

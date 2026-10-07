@@ -34,6 +34,10 @@ password, ratelimit counts it, or fail2ban bans the probing address. A plugin ad
 later with `app.RegisterPlugin` sits inside the middleware added before it, so it
 is not outermost there.
 
+Plugins implementing `collage.RequestHook`, such as accesslog and otel, run before
+any middleware, so they still see every probe; filter the probe paths there if
+they are noise.
+
 ## Endpoints
 
 | Path | Answers |
@@ -46,7 +50,12 @@ Both answer `GET` and `HEAD` only, as `text/plain; charset=utf-8` with
 
 The middleware answers before routing, so the paths belong to the plugin:
 
-- A page registered at either path fails startup, with an error naming the page.
+- A page the application, or a plugin listed before health, registers at either
+  path fails startup, with an error naming the page. The check compares the
+  page's path patterns as written and ignores locale prefixes, so a page at
+  `/healthz` in any locale is refused.
+- A page whose pattern matches an endpoint path, such as `/{slug}`, is not
+  refused; it simply loses that one value.
 - A document or a handler at either path is not checked, and is shadowed: the
   middleware answers and it is never reached. A project scaffolded with the demos
   has a `/healthz` document; delete it, or move the liveness endpoint with
@@ -83,8 +92,8 @@ health.NewWith(health.Options{LivePath: "/live", ReadyPath: "/ready"})
 | `MaxInFlight` | `maxInFlight` | `0` | Requests served at once at most; `0` is no cap |
 
 Startup fails when `livePath` equals `readyPath`, when either does not start with
-`/`, when a page claims either, or when `checkTimeout`, `cacheFor` or `maxInFlight`
-is negative.
+`/`, when a page the application, or a plugin listed before health, registers at
+either path, or when `checkTimeout`, `cacheFor` or `maxInFlight` is negative.
 
 ## Draining
 
