@@ -1,0 +1,205 @@
+package health_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	health "github.com/Elagoht/collage-health"
+	"github.com/Elagoht/collage/pkg/collage"
+)
+
+// app builds an application with the plugin and a home page at "/", plus a page
+// at each of extra, without starting it.
+func app(t *testing.T, p *health.Plugin, config map[string]json.RawMessage, extra ...string) *collage.App {
+	t.Helper()
+	a, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Logger: slog.New(slog.DiscardHandler),
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<main>home</main>`)},
+		}, Root: "t"},
+		Plugins:      []collage.Plugin{p},
+		PluginConfig: config,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := map[string]string{"home": "/"}
+	for _, path := range extra {
+		pages["page"+strings.ReplaceAll(path, "/", "-")] = path
+	}
+	for name, path := range pages {
+		if err := a.RegisterPage(collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).WithPath("en", path).Build()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a
+}
+
+// site is app's handler, after a start that must succeed.
+func site(t *testing.T, p *health.Plugin, config map[string]json.RawMessage) http.Handler {
+	t.Helper()
+	a := app(t, p, config)
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	return a.Handler()
+}
+
+func do(h http.Handler, method, path string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+	return rec
+}
+
+func expect(t *testing.T, rec *httptest.ResponseRecorder, status int, body string) {
+	t.Helper()
+	if rec.Code != status || rec.Body.String() != body {
+		t.Fatalf("got %d %q, want %d %q", rec.Code, rec.Body.String(), status, body)
+	}
+}
+
+func expectEndpointHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type %q, want text/plain; charset=utf-8", got)
+	}
+}
+
+func TestLiveness(t *testing.T) {
+	h := site(t, health.New(), nil)
+
+	rec := do(h, http.MethodGet, "/healthz")
+	expect(t, rec, http.StatusOK, "ok")
+	expectEndpointHeaders(t, rec)
+
+	rec = do(h, http.MethodHead, "/healthz")
+	expect(t, rec, http.StatusOK, "")
+	expectEndpointHeaders(t, rec)
+
+	rec = do(h, http.MethodPost, "/healthz")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow %q, want GET, HEAD", got)
+	}
+	expectEndpointHeaders(t, rec)
+}
+
+func TestReadinessAndDrain(t *testing.T) {
+	p := health.New()
+	h := site(t, p, nil)
+
+	rec := do(h, http.MethodGet, "/readyz")
+	expect(t, rec, http.StatusOK, "ok")
+	expectEndpointHeaders(t, rec)
+
+	p.OnDrain()
+	rec = do(h, http.MethodGet, "/readyz")
+	expect(t, rec, http.StatusServiceUnavailable, "draining")
+	expectEndpointHeaders(t, rec)
+
+	if rec := do(h, http.MethodGet, "/"); rec.Code != http.StatusOK {
+		t.Fatalf("page while draining: %d, want 200", rec.Code)
+	}
+	// Liveness is not readiness: a draining process is still alive.
+	expect(t, do(h, http.MethodGet, "/healthz"), http.StatusOK, "ok")
+}
+
+func TestCustomPaths(t *testing.T) {
+	h := site(t, health.NewWith(health.Options{LivePath: "/live", ReadyPath: "/ready"}), nil)
+	expect(t, do(h, http.MethodGet, "/live"), http.StatusOK, "ok")
+	expect(t, do(h, http.MethodGet, "/ready"), http.StatusOK, "ok")
+	if rec := do(h, http.MethodGet, "/healthz"); rec.Code != http.StatusNotFound {
+		t.Fatalf("/healthz: %d, want 404 from the app", rec.Code)
+	}
+}
+
+func TestInit_Validation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts health.Options
+		want string
+	}{
+		{"equal paths", health.Options{LivePath: "/h", ReadyPath: "/h"}, "livePath and readyPath are both"},
+		{"livePath without a slash", health.Options{LivePath: "healthz"}, `livePath "healthz" must start with "/"`},
+		{"readyPath without a slash", health.Options{ReadyPath: "readyz"}, `readyPath "readyz" must start with "/"`},
+		{"negative checkTimeout", health.Options{CheckTimeout: -1}, "checkTimeout must not be negative"},
+		{"negative cacheFor", health.Options{CacheFor: -1}, "cacheFor must not be negative"},
+		{"negative maxInFlight", health.Options{MaxInFlight: -1}, "maxInFlight -1 must not be negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := app(t, health.NewWith(tc.opts), nil).Start()
+			if err == nil {
+				t.Fatal("Start succeeded")
+			}
+			if !strings.Contains(err.Error(), "elagoht/health: "+tc.want) {
+				t.Fatalf("error %q, want it to contain %q", err, "elagoht/health: "+tc.want)
+			}
+		})
+	}
+}
+
+func TestInit_PathClaimedByPage(t *testing.T) {
+	for _, path := range []string{"/healthz", "/readyz/"} {
+		t.Run(path, func(t *testing.T) {
+			err := app(t, health.New(), nil, path).Start()
+			if err == nil {
+				t.Fatal("Start succeeded")
+			}
+			page := "page" + strings.ReplaceAll(path, "/", "-")
+			if !strings.Contains(err.Error(), "elagoht/health: ") || !strings.Contains(err.Error(), `page "`+page+`"`) {
+				t.Fatalf("error %q, want it to name page %q", err, page)
+			}
+		})
+	}
+}
+
+func TestConfigFromJSON(t *testing.T) {
+	h := site(t, health.New(), map[string]json.RawMessage{
+		health.Name: json.RawMessage(`{"readyPath":"/r","checkTimeout":"500ms"}`),
+	})
+	expect(t, do(h, http.MethodGet, "/r"), http.StatusOK, "ok")
+	expect(t, do(h, http.MethodGet, "/healthz"), http.StatusOK, "ok")
+
+	// A section naming no registered plugin fails as collage reports it.
+	err := app(t, health.New(), map[string]json.RawMessage{
+		"elagoht/healthz": json.RawMessage(`{"readyPath":"/r"}`),
+	}).Start()
+	if !errors.Is(err, collage.ErrUnknownPluginConfig) {
+		t.Fatalf("unknown key: %v, want ErrUnknownPluginConfig", err)
+	}
+
+	// A duration that is neither a Go duration nor nanoseconds fails.
+	err = app(t, health.New(), map[string]json.RawMessage{
+		health.Name: json.RawMessage(`{"checkTimeout":"soon"}`),
+	}).Start()
+	if err == nil || !strings.Contains(err.Error(), "elagoht/health: ") {
+		t.Fatalf("bad duration: %v", err)
+	}
+}
+
+func TestDurationNanoseconds(t *testing.T) {
+	var d health.Duration
+	if err := json.Unmarshal([]byte(`1500000000`), &d); err != nil || d != health.Duration(1500000000) {
+		t.Fatalf("got %v, %v", d, err)
+	}
+	if err := json.Unmarshal([]byte(`true`), &d); err == nil {
+		t.Fatal("a boolean was accepted")
+	}
+}
+
+// Compile-time: the plugin is told when a drain starts.
+var _ collage.DrainHook = health.New()

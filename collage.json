@@ -1,0 +1,63 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/health",
+  "description": "Package health answers liveness and readiness probes for a collage application, and turns readiness false while the server drains.",
+  "repository": "https://github.com/Elagoht/collage-health",
+  "config": {
+    "type": "object",
+    "description": "Package health answers liveness and readiness probes for a collage application, and turns readiness false while the server drains.",
+    "properties": {
+      "cacheFor": {
+        "description": "how long one readiness result is reused, default \"1s\"",
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+            "examples": [
+              "30s",
+              "5m"
+            ]
+          },
+          {
+            "type": "integer",
+            "description": "nanoseconds"
+          }
+        ]
+      },
+      "checkTimeout": {
+        "description": "per check, default \"2s\"",
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+            "examples": [
+              "30s",
+              "5m"
+            ]
+          },
+          {
+            "type": "integer",
+            "description": "nanoseconds"
+          }
+        ]
+      },
+      "details": {
+        "type": "boolean",
+        "description": "a JSON body naming each check, default false"
+      },
+      "livePath": {
+        "type": "string",
+        "description": "liveness endpoint, default \"/healthz\""
+      },
+      "maxInFlight": {
+        "type": "integer",
+        "description": "requests served at once at most, default 0: no cap"
+      },
+      "readyPath": {
+        "type": "string",
+        "description": "readiness endpoint, default \"/readyz\""
+      }
+    },
+    "additionalProperties": false
+  }
+}
