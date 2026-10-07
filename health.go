@@ -178,13 +178,19 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 }
 
 // ready is the readiness status, "ok", "unavailable" or "draining", and each
-// check's result. While draining the checks are not run. A probe whose request
-// ends while it waits for a run another probe started gets "unavailable".
+// check's result. While draining the checks are not run, and a drain that
+// starts during a run turns that probe's answer to "draining". A probe whose
+// request ends while it waits for a run another probe started gets
+// "unavailable".
 func (p *Plugin) ready(ctx context.Context) (string, map[string]bool) {
 	if p.draining.Load() {
 		return "draining", nil
 	}
 	result, ok := p.results(ctx)
+	// A drain that started while the checks ran wins over their result.
+	if p.draining.Load() {
+		return "draining", nil
+	}
 	if !ok {
 		return "unavailable", nil
 	}

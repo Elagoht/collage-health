@@ -80,14 +80,16 @@ Readiness is `503 unavailable` while any check fails. Liveness runs no checks.
 - **Detached from the probe.** The context is not the probe's request: a probe
   that disconnects does not cancel the checks other probes are waiting for.
 - **Cached and shared.** A result is reused for `cacheFor`. Probes that arrive
-  while a run is in flight wait for that run instead of starting their own, so
-  twenty probes at once run each check once. A waiting probe whose own request
-  ends gets `503 unavailable`.
+  while a run is in flight wait for that run and take its result instead of
+  starting their own, so twenty probes at once run each check once, however
+  short `cacheFor` is. A waiting probe whose own request ends gets
+  `503 unavailable`.
 - **Never the error's text.** An error is logged with the check's name, and a
   panic as well, through the application's logger. The response says only
   `unavailable`, or with `details` which check is `failing`.
 - **Not while draining.** Once a drain has started, readiness is `503 draining`
-  and the checks are not run.
+  and the checks are not run. A probe whose checks were running when the drain
+  started answers `503 draining` too.
 
 A check should honour its context. One that ignores it and never returns does
 not hold readiness: the run counts it as failing at `checkTimeout` and moves on.
@@ -107,7 +109,9 @@ With `details: true`, readiness answers JSON naming each check, sorted by name:
 ```
 
 While draining the checks are not run, so the body is `{"status":"draining"}`;
-with no checks registered it is `{"status":"ok"}`. The status code is the same as
+with no checks registered it is `{"status":"ok"}`. A probe that stops waiting for
+another probe's run, because its own request ended, gets `{"status":"unavailable"}`
+with no checks. The status code is the same as
 without `details`. The names are your own, so leave `details` off when the
 readiness endpoint is reachable from outside and the names say more than you want.
 

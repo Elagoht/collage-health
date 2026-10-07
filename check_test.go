@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,28 @@ func probe(h http.Handler) (*httptest.ResponseRecorder, time.Duration) {
 	start := time.Now()
 	rec := do(h, http.MethodGet, "/readyz")
 	return rec, time.Since(start)
+}
+
+// probeWithin is probe under a watchdog: a probe still blocked after limit
+// fails the test at once instead of hanging until -timeout.
+func probeWithin(t *testing.T, h http.Handler, limit time.Duration) (*httptest.ResponseRecorder, time.Duration) {
+	t.Helper()
+	type answer struct {
+		rec  *httptest.ResponseRecorder
+		took time.Duration
+	}
+	got := make(chan answer, 1)
+	go func() {
+		rec, took := probe(h)
+		got <- answer{rec, took}
+	}()
+	select {
+	case a := <-got:
+		return a.rec, a.took
+	case <-time.After(limit):
+		t.Fatalf("probe still blocked after %s", limit)
+		return nil, 0
+	}
 }
 
 func TestCheck_FailingMakesUnavailable(t *testing.T) {
@@ -53,12 +76,18 @@ func TestCheck_PanicIsFailing(t *testing.T) {
 }
 
 func TestCheck_TimeoutIsFailing(t *testing.T) {
+	release := make(chan struct{})
+	var left atomic.Int32
 	p := health.NewWith(health.Options{CheckTimeout: ms(50)})
-	p.Check("slow", func(context.Context) error { time.Sleep(200 * time.Millisecond); return nil })
+	p.Check("slow", func(context.Context) error { defer left.Add(1); <-release; return nil })
 	h := site(t, p, nil)
+	defer close(release)
 
-	rec, took := probe(h)
+	rec, took := probeWithin(t, h, 2*time.Second)
 	expect(t, rec, http.StatusServiceUnavailable, "unavailable")
+	if left.Load() != 0 {
+		t.Fatal("the check returned before the probe answered")
+	}
 	if took > 150*time.Millisecond {
 		t.Fatalf("answered after %s, want about checkTimeout", took)
 	}
@@ -83,14 +112,16 @@ func TestCheck_StuckCheckDoesNotBlockProbes(t *testing.T) {
 		if i > 0 {
 			time.Sleep(30 * time.Millisecond)
 		}
-		rec, took := probe(h)
+		rec, took := probeWithin(t, h, 2*time.Second)
 		expect(t, rec, http.StatusServiceUnavailable, "unavailable")
 		if took > 200*time.Millisecond {
 			t.Fatalf("probe %d answered after %s, want about checkTimeout", i, took)
 		}
 	}
-	if n := entered.Load(); n < 1 || n > probes {
-		t.Fatalf("check entered %d times, want 1..%d: one per run at most", n, probes)
+	// cacheFor is shorter than the gap between probes, so each probe starts its
+	// own run, and each run enters the check once.
+	if n := entered.Load(); n != probes {
+		t.Fatalf("check entered %d times, want %d: one per run", n, probes)
 	}
 
 	// Unblock the stuck goroutines so none outlives the test.
@@ -131,22 +162,147 @@ func TestCheck_ConcurrentProbesShareOneRun(t *testing.T) {
 }
 
 func TestCheck_CacheFor(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) {
+		var calls atomic.Int32
+		p := health.NewWith(health.Options{CacheFor: health.Duration(time.Hour)})
+		p.Check("db", func(context.Context) error { calls.Add(1); return nil })
+		h := site(t, p, nil)
+		for range 3 {
+			expect(t, do(h, http.MethodGet, "/readyz"), http.StatusOK, "ok")
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("within cacheFor: %d calls, want 1", n)
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		var calls atomic.Int32
+		p := health.NewWith(health.Options{CacheFor: ms(1)})
+		p.Check("db", func(context.Context) error { calls.Add(1); return nil })
+		h := site(t, p, nil)
+		do(h, http.MethodGet, "/readyz")
+		time.Sleep(20 * time.Millisecond)
+		do(h, http.MethodGet, "/readyz")
+		if n := calls.Load(); n != 2 {
+			t.Fatalf("after cacheFor: %d calls, want 2", n)
+		}
+	})
+}
+
+// Probes that wait for a run take that run's result, even when it is already
+// stale by cacheFor: they do not start a run of their own after it.
+func TestCheck_WaitersTakeTheRunsResult(t *testing.T) {
 	var calls atomic.Int32
-	p := health.NewWith(health.Options{CacheFor: ms(100)})
-	p.Check("db", func(context.Context) error { calls.Add(1); return nil })
+	release := make(chan struct{})
+	p := health.NewWith(health.Options{CacheFor: health.Duration(1)})
+	p.Check("db", func(context.Context) error {
+		calls.Add(1)
+		<-release
+		return nil
+	})
 	h := site(t, p, nil)
 
-	do(h, http.MethodGet, "/readyz")
-	time.Sleep(10 * time.Millisecond)
-	do(h, http.MethodGet, "/readyz")
+	var wg sync.WaitGroup
+	codes := make([]int, 20)
+	for i := range codes {
+		wg.Go(func() { codes[i] = do(h, http.MethodGet, "/readyz").Code })
+	}
+	// Let every probe reach the run before it ends.
+	for calls.Load() == 0 {
+		runtime.Gosched()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("probe %d: %d, want 200", i, code)
+		}
+	}
 	if n := calls.Load(); n != 1 {
-		t.Fatalf("within cacheFor: %d calls, want 1", n)
+		t.Fatalf("check called %d times, want 1", n)
 	}
-	time.Sleep(150 * time.Millisecond)
-	do(h, http.MethodGet, "/readyz")
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("after cacheFor: %d calls, want 2", n)
+}
+
+// A check that answers after its deadline does not change the cached result.
+func TestCheck_LateResultDiscarded(t *testing.T) {
+	release := make(chan struct{})
+	var left atomic.Int32
+	p := health.NewWith(health.Options{CheckTimeout: ms(30), CacheFor: health.Duration(time.Hour)})
+	p.Check("late", func(context.Context) error { defer left.Add(1); <-release; return nil })
+	h := site(t, p, nil)
+
+	rec, _ := probeWithin(t, h, 2*time.Second)
+	expect(t, rec, http.StatusServiceUnavailable, "unavailable")
+	close(release)
+	for left.Load() == 0 {
+		runtime.Gosched()
 	}
+	for range 20 {
+		time.Sleep(time.Millisecond)
+		expect(t, do(h, http.MethodGet, "/readyz"), http.StatusServiceUnavailable, "unavailable")
+	}
+}
+
+// A timed-out check's goroutines end once the check returns.
+func TestCheck_GoroutinesReturnToBaseline(t *testing.T) {
+	release := make(chan struct{})
+	var left atomic.Int32
+	p := health.NewWith(health.Options{CheckTimeout: ms(20)})
+	p.Check("late", func(context.Context) error { defer left.Add(1); <-release; return nil })
+	h := site(t, p, nil)
+	base := runtime.NumGoroutine()
+
+	rec, _ := probeWithin(t, h, 2*time.Second)
+	expect(t, rec, http.StatusServiceUnavailable, "unavailable")
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for left.Load() == 0 || runtime.NumGoroutine() > base {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines %d, base %d", runtime.NumGoroutine(), base)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Checks run in parallel: two that each wait for the other both pass.
+func TestCheck_Parallel(t *testing.T) {
+	a, b := make(chan struct{}), make(chan struct{})
+	p := health.NewWith(health.Options{CheckTimeout: health.Duration(time.Second)})
+	p.Check("a", func(ctx context.Context) error {
+		close(a)
+		select {
+		case <-b:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	p.Check("b", func(ctx context.Context) error {
+		close(b)
+		select {
+		case <-a:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	rec, _ := probeWithin(t, site(t, p, nil), 2*time.Second)
+	expect(t, rec, http.StatusOK, "ok")
+}
+
+// A probe that started before the drain and answers after it says draining.
+func TestCheck_RunAcrossDrain(t *testing.T) {
+	release, started := make(chan struct{}), make(chan struct{})
+	p := health.NewWith(health.Options{CheckTimeout: health.Duration(5 * time.Second)})
+	p.Check("db", func(context.Context) error { close(started); <-release; return nil })
+	h := site(t, p, nil)
+
+	first := make(chan *httptest.ResponseRecorder)
+	go func() { first <- do(h, http.MethodGet, "/readyz") }()
+	<-started
+	p.OnDrain()
+	close(release)
+	expect(t, <-first, http.StatusServiceUnavailable, "draining")
 }
 
 // A probe whose request ends does not fail the run: the check's ctx is its own.

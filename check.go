@@ -16,14 +16,21 @@ type check struct {
 
 // checks holds the registered checks and the last readiness run. One run is in
 // flight at most: a probe that finds the result stale and a run already going
-// waits for that run instead of starting its own.
+// waits for that run and takes its result instead of starting its own.
 type checks struct {
 	mu       sync.Mutex
 	list     []check
 	names    map[string]bool
-	last     time.Time       // when lastResult was stored
+	last     time.Time       // when result was stored
 	result   map[string]bool // name → passed, from the last run; never mutated once stored
-	inflight chan struct{}   // closed when the run in flight stores its result; nil when none is
+	inflight *flight         // the run in flight, or nil when none is
+}
+
+// flight is one run. result is written once, before done is closed, and only
+// read after it.
+type flight struct {
+	done   chan struct{}
+	result map[string]bool
 }
 
 // Check registers fn as a readiness check under name. Readiness is 503
@@ -60,40 +67,40 @@ func (p *Plugin) Check(name string, fn func(context.Context) error) {
 }
 
 // results returns each check's result, from the cache when it is younger than
-// cacheFor, else from the run in flight, else from a new run. ok is false when
-// ctx ended while the probe waited for another probe's run.
+// cacheFor, else from the run in flight, else from a new run. A probe that waited
+// for a run takes that run's result as it is, without checking its age again, so
+// waiting probes never chain runs. ok is false when ctx ended while the probe
+// waited for another probe's run.
 func (p *Plugin) results(ctx context.Context) (result map[string]bool, ok bool) {
 	c := &p.checks
-	for {
-		c.mu.Lock()
-		if c.result != nil && time.Since(c.last) < time.Duration(p.opts.CacheFor) {
-			result := c.result
-			c.mu.Unlock()
-			return result, true
-		}
-		if wait := c.inflight; wait != nil {
-			c.mu.Unlock()
-			select {
-			case <-wait:
-				continue // the run stored its result: read it
-			case <-ctx.Done():
-				return nil, false
-			}
-		}
-		done := make(chan struct{})
-		c.inflight = done
-		list := c.list
+	c.mu.Lock()
+	if c.result != nil && time.Since(c.last) < time.Duration(p.opts.CacheFor) {
+		result := c.result
 		c.mu.Unlock()
-
-		result := p.run(list)
-
-		c.mu.Lock()
-		c.result, c.last = result, time.Now()
-		c.inflight = nil
-		c.mu.Unlock()
-		close(done)
 		return result, true
 	}
+	if f := c.inflight; f != nil {
+		c.mu.Unlock()
+		select {
+		case <-f.done:
+			return f.result, true
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+	f := &flight{done: make(chan struct{})}
+	c.inflight = f
+	list := c.list
+	c.mu.Unlock()
+
+	f.result = p.run(list)
+
+	c.mu.Lock()
+	c.result, c.last = f.result, time.Now()
+	c.inflight = nil
+	c.mu.Unlock()
+	close(f.done)
+	return f.result, true
 }
 
 // run executes every check in parallel and waits for each until its own
