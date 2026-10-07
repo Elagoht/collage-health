@@ -43,10 +43,10 @@ they are noise.
 | Path | Answers |
 | --- | --- |
 | `/healthz` (`livePath`) | `200 ok` whenever the process serves a request. It runs no checks: restarting a process whose database is down does not bring the database back |
-| `/readyz` (`readyPath`) | `200 ok`, or `503 draining` once a drain has started |
+| `/readyz` (`readyPath`) | `200 ok`; `503 unavailable` while a [check](#checks) fails; `503 draining` once a drain has started |
 
-Both answer `GET` and `HEAD` only, as `text/plain; charset=utf-8` with
-`Cache-Control: no-store`. Any other method gets `405` with `Allow: GET, HEAD`.
+Both answer `GET` and `HEAD` only, as `text/plain; charset=utf-8` (readiness as
+`application/json` with `details`) and with `Cache-Control: no-store`. Any other method gets `405` with `Allow: GET, HEAD`.
 
 The middleware answers before routing, so the paths belong to the plugin:
 
@@ -60,6 +60,56 @@ The middleware answers before routing, so the paths belong to the plugin:
   middleware answers and it is never reached. A project scaffolded with the demos
   has a `/healthz` document; delete it, or move the liveness endpoint with
   `livePath`.
+
+## Checks
+
+Register the application's own readiness checks before the application starts:
+
+```go
+h := health.New()
+h.Check("db", func(ctx context.Context) error { return db.PingContext(ctx) })
+h.Check("cache", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
+```
+
+Readiness is `503 unavailable` while any check fails. Liveness runs no checks.
+
+- **Parallel and timed.** A probe runs every check at once, each under a context
+  that ends after `checkTimeout`. A check fails when it returns an error, panics,
+  or has not returned by then. The probe answers within about `checkTimeout`,
+  however many checks there are.
+- **Detached from the probe.** The context is not the probe's request: a probe
+  that disconnects does not cancel the checks other probes are waiting for.
+- **Cached and shared.** A result is reused for `cacheFor`. Probes that arrive
+  while a run is in flight wait for that run instead of starting their own, so
+  twenty probes at once run each check once. A waiting probe whose own request
+  ends gets `503 unavailable`.
+- **Never the error's text.** An error is logged with the check's name, and a
+  panic as well, through the application's logger. The response says only
+  `unavailable`, or with `details` which check is `failing`.
+- **Not while draining.** Once a drain has started, readiness is `503 draining`
+  and the checks are not run.
+
+A check should honour its context. One that ignores it and never returns does
+not hold readiness: the run counts it as failing at `checkTimeout` and moves on.
+Its goroutine is left running until the check returns, though, and each later run
+starts the check again, so a check stuck for good leaks one goroutine per run,
+at most one per `cacheFor`.
+
+`Check` panics on an empty name, a name already registered, a nil function, or a
+call after the application has started.
+
+### Details
+
+With `details: true`, readiness answers JSON naming each check, sorted by name:
+
+```json
+{"status":"unavailable","checks":{"cache":"ok","db":"failing"}}
+```
+
+While draining the checks are not run, so the body is `{"status":"draining"}`;
+with no checks registered it is `{"status":"ok"}`. The status code is the same as
+without `details`. The names are your own, so leave `details` off when the
+readiness endpoint is reachable from outside and the names say more than you want.
 
 ## Configuration
 
@@ -88,7 +138,7 @@ health.NewWith(health.Options{LivePath: "/live", ReadyPath: "/ready"})
 | `ReadyPath` | `readyPath` | `"/readyz"` | The readiness endpoint |
 | `CheckTimeout` | `checkTimeout` | `"2s"` | How long one check may run. A Go duration string, or nanoseconds |
 | `CacheFor` | `cacheFor` | `"1s"` | How long one readiness result is reused. A Go duration string, or nanoseconds |
-| `Details` | `details` | `false` | A JSON body naming each check |
+| `Details` | `details` | `false` | A JSON readiness body naming each check as `ok` or `failing` |
 | `MaxInFlight` | `maxInFlight` | `0` | Requests served at once at most; `0` is no cap |
 
 Startup fails when `livePath` equals `readyPath`, when either does not start with

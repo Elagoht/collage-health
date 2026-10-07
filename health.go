@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -59,6 +60,8 @@ type Plugin struct {
 
 	inited   atomic.Bool // set once Init has validated the options
 	draining atomic.Bool // set by OnDrain
+	logger   *slog.Logger
+	checks   checks
 }
 
 var (
@@ -113,6 +116,10 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		}
 	}
 	p.opts = opts
+	p.logger = host.Logger()
+	if p.logger == nil {
+		p.logger = slog.Default()
+	}
 	p.inited.Store(true)
 	return host.Use(p.middleware)
 }
@@ -150,10 +157,18 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 		case p.opts.LivePath:
 			answer(w, r, http.StatusOK, "ok")
 		case p.opts.ReadyPath:
-			status, _ := p.ready(r.Context())
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				answer(w, r, http.StatusMethodNotAllowed, "")
+				return
+			}
+			status, result := p.ready(r.Context())
 			code := http.StatusOK
 			if status != "ok" {
 				code = http.StatusServiceUnavailable
+			}
+			if p.opts.Details {
+				answerDetails(w, r, code, status, result)
+				return
 			}
 			answer(w, r, code, status)
 		default:
@@ -162,27 +177,72 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 	})
 }
 
-// ready is the readiness status, "ok" or "draining", and each check's result.
-func (p *Plugin) ready(context.Context) (string, map[string]bool) {
+// ready is the readiness status, "ok", "unavailable" or "draining", and each
+// check's result. While draining the checks are not run. A probe whose request
+// ends while it waits for a run another probe started gets "unavailable".
+func (p *Plugin) ready(ctx context.Context) (string, map[string]bool) {
 	if p.draining.Load() {
 		return "draining", nil
 	}
-	return "ok", nil
+	result, ok := p.results(ctx)
+	if !ok {
+		return "unavailable", nil
+	}
+	for _, passed := range result {
+		if !passed {
+			return "unavailable", result
+		}
+	}
+	return "ok", result
+}
+
+// report is the details body. encoding/json writes a map's keys sorted, so the
+// checks come out by name.
+type report struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks,omitempty"`
+}
+
+// answerDetails writes the readiness response as JSON: the status and each
+// check as "ok" or "failing", never an error's text.
+func answerDetails(w http.ResponseWriter, r *http.Request, code int, status string, result map[string]bool) {
+	rep := report{Status: status}
+	if len(result) > 0 {
+		rep.Checks = make(map[string]string, len(result))
+		for name, passed := range result {
+			rep.Checks[name] = "failing"
+			if passed {
+				rep.Checks[name] = "ok"
+			}
+		}
+	}
+	body, err := json.Marshal(rep)
+	if err != nil { // a struct of strings always marshals
+		body = []byte(`{"status":"unavailable"}`)
+		code = http.StatusServiceUnavailable
+	}
+	write(w, r, code, "application/json", string(body))
 }
 
 // answer writes an endpoint's plain-text response: GET and HEAD only, never
 // cached, and no body for HEAD.
 func answer(w http.ResponseWriter, r *http.Request, code int, body string) {
+	write(w, r, code, "text/plain; charset=utf-8", body)
+}
+
+// write writes an endpoint's response with contentType. Any method but GET and
+// HEAD gets 405 instead, as plain text.
+func write(w http.ResponseWriter, r *http.Request, code int, contentType, body string) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
-	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 	default:
 		h.Set("Allow", "GET, HEAD")
-		code, body = http.StatusMethodNotAllowed, "method not allowed"
+		code, body, contentType = http.StatusMethodNotAllowed, "method not allowed", "text/plain; charset=utf-8"
 	}
+	h.Set("Content-Type", contentType)
 	w.WriteHeader(code)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write([]byte(body))
