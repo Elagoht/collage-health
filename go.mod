@@ -7,6 +7,4 @@ module github.com/Elagoht/collage-health
 
 go 1.26
 
-require github.com/Elagoht/collage v0.52.0
-
-replace github.com/Elagoht/collage => ../collage-health-core
+require github.com/Elagoht/collage v0.53.0
