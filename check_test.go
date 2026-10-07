@@ -3,6 +3,7 @@ package health_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -10,9 +11,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	health "github.com/Elagoht/collage-health"
+	"github.com/Elagoht/collage/pkg/collage"
 )
 
 func ms(n int) health.Duration { return health.Duration(time.Duration(n) * time.Millisecond) }
@@ -403,4 +406,100 @@ func TestCheck_Misuse(t *testing.T) {
 	expectPanic(t, "a duplicate", func() { p.Check("db", ok) })
 	site(t, p, nil)
 	expectPanic(t, "a call after Init", func() { p.Check("cache", ok) })
+}
+
+// A check still running at checkTimeout has its context cancelled, so one that
+// honours it can stop.
+func TestCheck_TimeoutCancelsTheContext(t *testing.T) {
+	got := make(chan error, 1)
+	p := health.NewWith(health.Options{CheckTimeout: ms(50)})
+	p.Check("waits", func(ctx context.Context) error {
+		<-ctx.Done()
+		got <- ctx.Err()
+		return ctx.Err()
+	})
+	h := site(t, p, nil)
+	start := time.Now()
+	go do(h, http.MethodGet, "/readyz")
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the check's context ended with %v, want context.DeadlineExceeded", err)
+		}
+		if took := time.Since(start); took > 500*time.Millisecond {
+			t.Fatalf("the context ended after %s, want about checkTimeout", took)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the check's context was never cancelled")
+	}
+}
+
+// records is a slog.Handler keeping every record it is handed.
+type records struct {
+	mu   sync.Mutex
+	list []slog.Record
+}
+
+func (*records) Enabled(context.Context, slog.Level) bool { return true }
+func (r *records) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.list = append(r.list, rec.Clone())
+	return nil
+}
+func (r *records) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *records) WithGroup(string) slog.Handler      { return r }
+
+// count is how many records at level carry message and the attribute check=name.
+func (r *records) count(level slog.Level, message, name string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rec := range r.list {
+		if rec.Level != level || rec.Message != message {
+			continue
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "check" && a.Value.String() == name {
+				n++
+				return false
+			}
+			return true
+		})
+	}
+	return n
+}
+
+// A failing check is logged at Warn and a panicking one at Error, each once and
+// with its name, through the application's logger.
+func TestCheck_Logging(t *testing.T) {
+	logs := &records{}
+	p := health.New()
+	p.Check("db", func(context.Context) error { return errors.New("refused") })
+	p.Check("boom", func(context.Context) error { panic("kaboom") })
+	a, err := collage.New(&collage.Config{
+		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
+		Logger: slog.New(logs),
+		Template: collage.TemplateConfig{FS: fstest.MapFS{
+			"t/p.html": {Data: []byte(`<main>home</main>`)},
+		}, Root: "t"},
+		Plugins: []collage.Plugin{p},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Start(); err != nil {
+		t.Fatal(err)
+	}
+	expect(t, do(a.Handler(), http.MethodGet, "/readyz"), http.StatusServiceUnavailable, "unavailable")
+
+	if n := logs.count(slog.LevelWarn, "elagoht/health: check failed", "db"); n != 1 {
+		t.Errorf("%d Warn records for the failing check, want 1", n)
+	}
+	if n := logs.count(slog.LevelError, "elagoht/health: check panicked", "boom"); n != 1 {
+		t.Errorf("%d Error records for the panicking check, want 1", n)
+	}
+	if n := logs.count(slog.LevelWarn, "elagoht/health: check failed", "boom"); n != 0 {
+		t.Errorf("the panic was logged again at Warn, %d times", n)
+	}
 }

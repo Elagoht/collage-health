@@ -127,9 +127,10 @@ func freePort(t *testing.T) int {
 // Over a real server: during the drain readiness says draining and pages are
 // still served; once Shutdown returns the port is closed.
 func TestE2E_DrainOverRealServer(t *testing.T) {
+	const drain = 2 * time.Second
 	port := freePort(t)
 	app, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "127.0.0.1", Port: port, DrainDelay: 300 * time.Millisecond},
+		Server: collage.ServerConfig{Host: "127.0.0.1", Port: port, DrainDelay: drain},
 		Logger: slog.New(slog.DiscardHandler),
 		Template: collage.TemplateConfig{FS: fstest.MapFS{
 			"t/p.html": {Data: []byte(`<main>home</main>`)},
@@ -186,13 +187,16 @@ func TestE2E_DrainOverRealServer(t *testing.T) {
 		if err == nil && code == http.StatusServiceUnavailable && body == "draining" {
 			break
 		}
-		if time.Since(start) > 250*time.Millisecond {
+		if time.Since(start) > drain/2 {
 			t.Fatalf("readiness during the drain: %d %q %v, want 503 draining", code, body, err)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	if code, body, err := get("/"); err != nil || code != http.StatusOK || body != "<main>home</main>" {
 		t.Fatalf("a page during the drain: %d %q %v, want 200", code, body, err)
+	}
+	if since := time.Since(start); since >= drain {
+		t.Fatalf("the drain checks took %s, past the %s drain: they did not run within it", since, drain)
 	}
 
 	select {
@@ -203,8 +207,8 @@ func TestE2E_DrainOverRealServer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Shutdown did not return")
 	}
-	if took := time.Since(start); took < 300*time.Millisecond {
-		t.Errorf("Shutdown returned after %s, before the 300ms drain", took)
+	if took := time.Since(start); took < drain {
+		t.Errorf("Shutdown returned after %s, before the %s drain", took, drain)
 	}
 	select {
 	case err := <-served:

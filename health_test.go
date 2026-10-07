@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 
@@ -78,7 +79,10 @@ func expectEndpointHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 }
 
 func TestLiveness(t *testing.T) {
-	h := site(t, health.New(), nil)
+	p := health.New()
+	var calls atomic.Int32
+	p.Check("counted", func(context.Context) error { calls.Add(1); return nil })
+	h := site(t, p, nil)
 
 	rec := do(h, http.MethodGet, "/healthz")
 	expect(t, rec, http.StatusOK, "ok")
@@ -96,6 +100,33 @@ func TestLiveness(t *testing.T) {
 		t.Errorf("Allow %q, want GET, HEAD", got)
 	}
 	expectEndpointHeaders(t, rec)
+
+	// Liveness runs no checks, whatever the method.
+	for range 3 {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+			do(h, method, "/healthz")
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("liveness ran the check %d times, want 0", n)
+	}
+}
+
+// A method readiness refuses runs no checks.
+func TestReadiness_RefusedMethodRunsNoChecks(t *testing.T) {
+	p := health.New()
+	var calls atomic.Int32
+	p.Check("counted", func(context.Context) error { calls.Add(1); return nil })
+	h := site(t, p, nil)
+	for range 3 {
+		rec := do(h, http.MethodPost, "/readyz")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST /readyz: %d, want 405", rec.Code)
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("POST /readyz ran the check %d times, want 0", n)
+	}
 }
 
 func TestReadinessAndDrain(t *testing.T) {

@@ -112,7 +112,7 @@ func holdN(t *testing.T, h http.Handler, hold *holder, prefix string, n int) (re
 	for range n {
 		select {
 		case <-hold.entered:
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: the held requests did not all get in", prefix)
 		}
 	}
