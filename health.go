@@ -1,5 +1,6 @@
 // Package health answers liveness and readiness probes for a collage
-// application, and turns readiness false while the server drains.
+// application, turns readiness false while the server drains, and can shed load
+// past a cap on requests in flight.
 package health
 
 import (
@@ -62,6 +63,7 @@ type Plugin struct {
 	draining atomic.Bool // set by OnDrain
 	logger   *slog.Logger
 	checks   checks
+	inFlight atomic.Int64 // requests counted against MaxInFlight now being served
 }
 
 var (
@@ -172,9 +174,40 @@ func (p *Plugin) middleware(next http.Handler) http.Handler {
 			}
 			answer(w, r, code, status)
 		default:
-			next.ServeHTTP(w, r)
+			p.serve(next, w, r)
 		}
 	})
+}
+
+// serve passes a request on, counted against MaxInFlight when there is a cap.
+// Past the cap it is refused at once, with no queue. A build's capture is not a
+// client and is never counted or refused.
+func (p *Plugin) serve(next http.Handler, w http.ResponseWriter, r *http.Request) {
+	limit := int64(p.opts.MaxInFlight)
+	if limit <= 0 || collage.IsCapture(r.Context()) {
+		next.ServeHTTP(w, r)
+		return
+	}
+	if p.inFlight.Add(1) > limit {
+		p.inFlight.Add(-1)
+		shed(w)
+		return
+	}
+	// Deferred, so a panic unwinding to the core's recovery gives the slot back.
+	defer p.inFlight.Add(-1)
+	next.ServeHTTP(w, r)
+}
+
+// shed refuses a request past the cap, whatever its method: 503, try again in a
+// second, never cached.
+func shed(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Retry-After", "1")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("overloaded"))
 }
 
 // ready is the readiness status, "ok", "unavailable" or "draining", and each

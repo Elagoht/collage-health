@@ -160,6 +160,41 @@ out before the port closes. It is ignored in development. See
 [Deployment](https://collage.furkanbaytekin.dev/en/docs/deployment/) in the
 collage docs.
 
+## Load shedding
+
+With `maxInFlight` above `0`, the plugin caps how many requests it lets through
+at once. The request that would go past the cap is refused straight away:
+
+```
+HTTP/1.1 503 Service Unavailable
+Retry-After: 1
+Cache-Control: no-store
+Content-Type: text/plain; charset=utf-8
+
+overloaded
+```
+
+- **One global cap.** The count covers the whole process, not each client or
+  path. Use ratelimit for a limit per client.
+- **No queue.** A refused request is not held until a slot frees up. It is
+  answered `503` at once, whatever its method, and the client is told to retry in
+  a second.
+- **The probes are exempt.** `livePath` and `readyPath` are never counted or
+  refused. A loaded instance still answers its readiness probe, and it still
+  says `draining` once a drain starts.
+- **Build captures are exempt.** A static build asks the handler for each page
+  to capture its headers (`collage.IsCapture`). Those requests are not clients,
+  so they are never counted or refused, even while live requests fill the cap.
+- **A slot is held until the response is done.** It is given back when the
+  handler returns, even when the handler panics. A long-lived response, such as
+  a stream, keeps its slot for as long as it runs.
+
+Only requests that reach the plugin's middleware are counted. Listed first, that
+is every page, document, mount and handler request. Collage answers a few before
+any middleware runs, and those are not counted: the development reload channel,
+and a request whose path needs cleaning, which gets a redirect or 404.
+`collage.RequestHook` plugins such as accesslog still see a refused request.
+
 ## Kubernetes
 
 ```yaml
