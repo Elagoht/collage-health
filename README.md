@@ -21,7 +21,7 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.53.0 or later, which tells plugins a drain has started
+Requires collage v0.58.0 or later, which tells plugins a drain has started
 (`collage.DrainHook`) and has `ServerConfig.DrainDelay`.
 
 ## Where to list it
@@ -248,3 +248,13 @@ Port 8080 is the one the Dockerfile `collage build -i` writes listens on. With
 these probes, `DrainDelay: 5 * time.Second` covers the readiness probe's two
 seconds with room to spare. Keep `terminationGracePeriodSeconds` above
 `DrainDelay + ShutdownTimeout`, or the pod is killed mid-shutdown.
+
+## Changes
+
+### v0.1.1
+
+- collage.json has `order` −30, so `collage plugin add` lists it first, before
+  anything that refuses or answers a request.
+- collage.json is regenerated for editors: its description mentions load
+  shedding.
+- Requires collage v0.58.0.

@@ -1,11 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
   "name": "elagoht/health",
-  "description": "Package health answers liveness and readiness probes for a collage application, and turns readiness false while the server drains.",
+  "description": "Package health answers liveness and readiness probes for a collage application, turns readiness false while the server drains, and can shed load past a cap on requests in flight.",
   "repository": "https://github.com/Elagoht/collage-health",
+  "order": -30,
   "config": {
     "type": "object",
-    "description": "Package health answers liveness and readiness probes for a collage application, and turns readiness false while the server drains.",
+    "description": "Package health answers liveness and readiness probes for a collage application, turns readiness false while the server drains, and can shed load past a cap on requests in flight.",
     "properties": {
       "cacheFor": {
         "description": "how long one readiness result is reused, default \"1s\"",
