@@ -172,8 +172,8 @@ func TestInit_Validation(t *testing.T) {
 			if err == nil {
 				t.Fatal("Start succeeded")
 			}
-			if !strings.Contains(err.Error(), "health: "+tc.want) {
-				t.Fatalf("error %q, want it to contain %q", err, "health: "+tc.want)
+			if own := pluginError(err); !strings.HasPrefix(own, "health: ") || !strings.Contains(own, tc.want) {
+				t.Fatalf("plugin's error %q, want it to start with %q and contain %q", own, "health: ", tc.want)
 			}
 		})
 	}
@@ -187,7 +187,7 @@ func TestInit_PathClaimedByPage(t *testing.T) {
 				t.Fatal("Start succeeded")
 			}
 			page := "page" + strings.ReplaceAll(path, "/", "-")
-			if !strings.Contains(err.Error(), "health: ") || !strings.Contains(err.Error(), `page "`+page+`"'s path (locale "en")`) {
+			if own := pluginError(err); !strings.HasPrefix(own, "health: ") || !strings.Contains(own, `page "`+page+`"'s path (locale "en")`) {
 				t.Fatalf("error %q, want it to name page %q", err, page)
 			}
 		})
@@ -257,7 +257,8 @@ func TestConfigFromJSON(t *testing.T) {
 	err = start(t, health.New(health.Options{}), map[string]json.RawMessage{
 		health.Name: json.RawMessage(`{"checkTimeout":"soon"}`),
 	})
-	if err == nil || !strings.Contains(err.Error(), "health: ") {
+	// Decoding is collage's: its error names the plugin and the key.
+	if err == nil || !strings.Contains(err.Error(), `elagoht/health: "checkTimeout"`) {
 		t.Fatalf("bad duration: %v", err)
 	}
 }
@@ -302,5 +303,26 @@ func TestDurationNumberRefused(t *testing.T) {
 				t.Fatalf("start = %v, want an error naming %s", err, key)
 			}
 		})
+	}
+}
+
+// pluginError is the plugin's own error inside err: collage wraps it with the
+// plugin's name, and joins it with what shutting the started plugins down
+// returned, nothing here.
+func pluginError(err error) string {
+	for {
+		switch e := err.(type) {
+		case interface{ Unwrap() error }:
+			if inner := e.Unwrap(); inner != nil {
+				err = inner
+				continue
+			}
+		case interface{ Unwrap() []error }:
+			if inner := e.Unwrap(); len(inner) == 1 {
+				err = inner[0]
+				continue
+			}
+		}
+		return err.Error()
 	}
 }
