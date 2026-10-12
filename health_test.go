@@ -14,45 +14,41 @@ import (
 
 	health "github.com/Elagoht/collage-health"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
-// app builds an application with the plugin and a home page at "/", plus a page
-// at each of extra, without starting it.
-func app(t *testing.T, p *health.Plugin, config map[string]json.RawMessage, extra ...string) *collage.App {
-	t.Helper()
-	a, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Logger: slog.New(slog.DiscardHandler),
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<main>home</main>`)},
-		}, Root: "t"},
-		Plugins:      []collage.Plugin{p},
-		PluginConfig: config,
-	})
-	if err != nil {
-		t.Fatal(err)
+// siteOptions is an application with the plugin and a home page at "/", plus a
+// page at each of extra.
+func siteOptions(p *health.Plugin, config map[string]json.RawMessage, extra ...string) []collagetest.SiteOption {
+	options := []collagetest.SiteOption{
+		collagetest.WithPlugins(p),
+		collagetest.WithoutHome(),
+		collagetest.WithTemplates(map[string]string{"p.html": `<main>home</main>`}),
 	}
 	pages := map[string]string{"home": "/"}
 	for _, path := range extra {
 		pages["page"+strings.ReplaceAll(path, "/", "-")] = path
 	}
 	for name, path := range pages {
-		if err := a.RegisterPage(collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).WithPath("en", path).Build()); err != nil {
-			t.Fatal(err)
-		}
+		options = append(options, collagetest.WithRegister(collage.NewPage(name).WithContent(collage.NewFragment(name, "p.html").Build()).WithPath("en", path).Build()))
 	}
-	return a
+	if config != nil {
+		options = append(options, collagetest.WithConfig(func(c *collage.Config) { c.PluginConfig = config }))
+	}
+	return options
 }
 
-// site is app's handler, after a start that must succeed.
+// start starts siteOptions' application, for a test that expects it to fail.
+func start(t *testing.T, p *health.Plugin, config map[string]json.RawMessage, extra ...string) error {
+	t.Helper()
+	_, err := collagetest.TrySite(t, siteOptions(p, config, extra...)...)
+	return err
+}
+
+// site is siteOptions' application's handler, after a start that must succeed.
 func site(t *testing.T, p *health.Plugin, config map[string]json.RawMessage) http.Handler {
 	t.Helper()
-	a := app(t, p, config)
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
-	return a.Handler()
+	return collagetest.NewSite(t, siteOptions(p, config)...).App.Handler()
 }
 
 func do(h http.Handler, method, path string) *httptest.ResponseRecorder {
@@ -79,7 +75,7 @@ func expectEndpointHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 }
 
 func TestLiveness(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	var calls atomic.Int32
 	p.Check("counted", func(context.Context) error { calls.Add(1); return nil })
 	h := site(t, p, nil)
@@ -114,7 +110,7 @@ func TestLiveness(t *testing.T) {
 
 // A method readiness refuses runs no checks.
 func TestReadiness_RefusedMethodRunsNoChecks(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	var calls atomic.Int32
 	p.Check("counted", func(context.Context) error { calls.Add(1); return nil })
 	h := site(t, p, nil)
@@ -130,7 +126,7 @@ func TestReadiness_RefusedMethodRunsNoChecks(t *testing.T) {
 }
 
 func TestReadinessAndDrain(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	h := site(t, p, nil)
 
 	rec := do(h, http.MethodGet, "/readyz")
@@ -150,7 +146,7 @@ func TestReadinessAndDrain(t *testing.T) {
 }
 
 func TestCustomPaths(t *testing.T) {
-	h := site(t, health.NewWith(health.Options{LivePath: "/live", ReadyPath: "/ready"}), nil)
+	h := site(t, health.New(health.Options{LivePath: "/live", ReadyPath: "/ready"}), nil)
 	expect(t, do(h, http.MethodGet, "/live"), http.StatusOK, "ok")
 	expect(t, do(h, http.MethodGet, "/ready"), http.StatusOK, "ok")
 	if rec := do(h, http.MethodGet, "/healthz"); rec.Code != http.StatusNotFound {
@@ -172,12 +168,12 @@ func TestInit_Validation(t *testing.T) {
 		{"negative maxInFlight", health.Options{MaxInFlight: -1}, "maxInFlight -1 must not be negative"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := app(t, health.NewWith(tc.opts), nil).Start()
+			err := start(t, health.New(tc.opts), nil)
 			if err == nil {
 				t.Fatal("Start succeeded")
 			}
-			if !strings.Contains(err.Error(), "elagoht/health: "+tc.want) {
-				t.Fatalf("error %q, want it to contain %q", err, "elagoht/health: "+tc.want)
+			if !strings.Contains(err.Error(), "health: "+tc.want) {
+				t.Fatalf("error %q, want it to contain %q", err, "health: "+tc.want)
 			}
 		})
 	}
@@ -186,12 +182,12 @@ func TestInit_Validation(t *testing.T) {
 func TestInit_PathClaimedByPage(t *testing.T) {
 	for _, path := range []string{"/healthz", "/readyz/"} {
 		t.Run(path, func(t *testing.T) {
-			err := app(t, health.New(), nil, path).Start()
+			err := start(t, health.New(health.Options{}), nil, path)
 			if err == nil {
 				t.Fatal("Start succeeded")
 			}
 			page := "page" + strings.ReplaceAll(path, "/", "-")
-			if !strings.Contains(err.Error(), "elagoht/health: ") || !strings.Contains(err.Error(), `page "`+page+`"'s path (locale "en")`) {
+			if !strings.Contains(err.Error(), "health: ") || !strings.Contains(err.Error(), `page "`+page+`"'s path (locale "en")`) {
 				t.Fatalf("error %q, want it to name page %q", err, page)
 			}
 		})
@@ -216,7 +212,7 @@ func (refuseAll) Init(_ context.Context, host collage.Host) error {
 // Listed first, the plugin answers probes before a plugin listed after it can
 // refuse them.
 func TestListedFirstAnswersBeforeLaterPlugins(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	a, err := collage.New(&collage.Config{
 		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
 		Logger: slog.New(slog.DiscardHandler),
@@ -243,54 +239,41 @@ func TestListedFirstAnswersBeforeLaterPlugins(t *testing.T) {
 }
 
 func TestConfigFromJSON(t *testing.T) {
-	h := site(t, health.New(), map[string]json.RawMessage{
+	h := site(t, health.New(health.Options{}), map[string]json.RawMessage{
 		health.Name: json.RawMessage(`{"readyPath":"/r","checkTimeout":"500ms"}`),
 	})
 	expect(t, do(h, http.MethodGet, "/r"), http.StatusOK, "ok")
 	expect(t, do(h, http.MethodGet, "/healthz"), http.StatusOK, "ok")
 
 	// A section naming no registered plugin fails as collage reports it.
-	err := app(t, health.New(), map[string]json.RawMessage{
+	err := start(t, health.New(health.Options{}), map[string]json.RawMessage{
 		"elagoht/healthz": json.RawMessage(`{"readyPath":"/r"}`),
-	}).Start()
+	})
 	if !errors.Is(err, collage.ErrUnknownPluginConfig) {
 		t.Fatalf("unknown key: %v, want ErrUnknownPluginConfig", err)
 	}
 
-	// A duration that is neither a Go duration nor nanoseconds fails.
-	err = app(t, health.New(), map[string]json.RawMessage{
+	// A duration that is not a Go duration fails.
+	err = start(t, health.New(health.Options{}), map[string]json.RawMessage{
 		health.Name: json.RawMessage(`{"checkTimeout":"soon"}`),
-	}).Start()
-	if err == nil || !strings.Contains(err.Error(), "elagoht/health: ") {
+	})
+	if err == nil || !strings.Contains(err.Error(), "health: ") {
 		t.Fatalf("bad duration: %v", err)
 	}
 }
 
-func TestDurationNanoseconds(t *testing.T) {
-	var d health.Duration
-	if err := json.Unmarshal([]byte(`1500000000`), &d); err != nil || d != health.Duration(1500000000) {
-		t.Fatalf("got %v, %v", d, err)
-	}
-	if err := json.Unmarshal([]byte(`true`), &d); err == nil {
-		t.Fatal("a boolean was accepted")
-	}
-}
-
 // Compile-time: the plugin is told when a drain starts.
-var _ collage.DrainHook = health.New()
+var _ collage.DrainHook = health.New(health.Options{})
 
 // One Plugin value serves one App: a second App starting with it fails, rather
 // than inheriting the first App's drain and answering draining for good.
 func TestInit_SecondAppRefused(t *testing.T) {
-	p := health.New()
-	first := app(t, p, nil)
-	if err := first.Start(); err != nil {
+	p := health.New(health.Options{})
+	first := collagetest.NewSite(t, siteOptions(p, nil)...)
+	if err := first.App.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Shutdown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	err := app(t, p, nil).Start()
+	err := start(t, p, nil)
 	if err == nil || !strings.Contains(err.Error(), "a Plugin value serves one App; create another with New") {
 		t.Fatalf("second App's Start: %v, want the one-App error", err)
 	}
@@ -298,11 +281,26 @@ func TestInit_SecondAppRefused(t *testing.T) {
 
 // An Init that failed does not count: the value may be started again.
 func TestInit_RetryAfterFailedInit(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	bad := map[string]json.RawMessage{health.Name: json.RawMessage(`{"livePath":"nope"}`)}
-	if err := app(t, p, bad).Start(); err == nil {
+	if err := start(t, p, bad); err == nil {
 		t.Fatal("a livePath without a leading slash started")
 	}
 	h := site(t, p, nil)
 	expect(t, do(h, http.MethodGet, "/readyz"), http.StatusOK, "ok")
+}
+
+// A duration written as a number is refused, naming the key: "checkTimeout": 2
+// used to be 2ns, which failed every check and turned readiness to 503 for good.
+func TestDurationNumberRefused(t *testing.T) {
+	for _, key := range []string{"checkTimeout", "cacheFor"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := collagetest.TrySite(t,
+				collagetest.WithPlugins(health.New(health.Options{})),
+				collagetest.WithPluginConfig(health.Name, `{"`+key+`": 2}`))
+			if err == nil || !strings.Contains(err.Error(), `"`+key+`"`) {
+				t.Fatalf("start = %v, want an error naming %s", err, key)
+			}
+		})
+	}
 }

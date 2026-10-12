@@ -20,39 +20,16 @@ import (
 // Name is the plugin's name.
 const Name = "elagoht/health"
 
-const version = "0.1.2"
-
-// Duration is a time.Duration that reads from configuration as Go writes one,
-// "2s", as well as a number of nanoseconds.
-type Duration time.Duration
-
-// UnmarshalJSON reads "2s" or a number of nanoseconds.
-func (d *Duration) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err == nil {
-		v, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("elagoht/health: %w", err)
-		}
-		*d = Duration(v)
-		return nil
-	}
-	var n int64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return errors.New(`elagoht/health: a duration is a string like "2s" or a number of nanoseconds`)
-	}
-	*d = Duration(n)
-	return nil
-}
+const version = "0.2.0"
 
 // Options configures the plugin.
 type Options struct {
-	LivePath     string   `json:"livePath"`     // liveness endpoint, default "/healthz"
-	ReadyPath    string   `json:"readyPath"`    // readiness endpoint, default "/readyz"
-	CheckTimeout Duration `json:"checkTimeout"` // per check, default "2s"
-	CacheFor     Duration `json:"cacheFor"`     // how long one readiness result is reused, default "1s"
-	Details      bool     `json:"details"`      // a JSON body naming each check, default false
-	MaxInFlight  int      `json:"maxInFlight"`  // requests served at once at most, default 0: no cap
+	LivePath     string           `json:"livePath"`     // liveness endpoint, default "/healthz"
+	ReadyPath    string           `json:"readyPath"`    // readiness endpoint, default "/readyz"
+	CheckTimeout collage.Duration `json:"checkTimeout"` // per check, default "2s"
+	CacheFor     collage.Duration `json:"cacheFor"`     // how long one readiness result is reused, default "1s"
+	Details      bool             `json:"details"`      // a JSON body naming each check, default false
+	MaxInFlight  int              `json:"maxInFlight"`  // requests served at once at most, default 0: no cap
 }
 
 // Plugin is the health plugin.
@@ -71,11 +48,8 @@ var (
 	_ collage.DrainHook = (*Plugin)(nil)
 )
 
-// New returns the plugin with its defaults, which configuration may change.
-func New() *Plugin { return &Plugin{} }
-
-// NewWith returns the plugin with opts as the defaults configuration starts from.
-func NewWith(opts Options) *Plugin { return &Plugin{opts: opts} }
+// New returns the plugin with opts as the defaults configuration starts from.
+func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 // Name returns Name.
 func (p *Plugin) Name() string { return Name }
@@ -89,7 +63,7 @@ func (p *Plugin) Version() string { return version }
 // fails, since the value keeps that App's drain and checks.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if p.inited.Load() {
-		return errors.New("elagoht/health: a Plugin value serves one App; create another with New")
+		return errors.New("health: a Plugin value serves one App; create another with New")
 	}
 	opts, err := collage.PluginConfig(host, p.opts)
 	if err != nil {
@@ -102,10 +76,10 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		opts.ReadyPath = "/readyz"
 	}
 	if opts.CheckTimeout == 0 {
-		opts.CheckTimeout = Duration(2 * time.Second)
+		opts.CheckTimeout = collage.Duration(2 * time.Second)
 	}
 	if opts.CacheFor == 0 {
-		opts.CacheFor = Duration(time.Second)
+		opts.CacheFor = collage.Duration(time.Second)
 	}
 	if err := opts.validate(); err != nil {
 		return err
@@ -116,7 +90,7 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		for locale, pattern := range page.Paths {
 			for _, path := range []string{opts.LivePath, opts.ReadyPath} {
 				if pattern == path || strings.TrimSuffix(pattern, "/") == strings.TrimSuffix(path, "/") {
-					return fmt.Errorf("elagoht/health: %s is also page %q's path (locale %q); the endpoint would shadow it — move the endpoint with livePath/readyPath", path, page.Name, locale)
+					return fmt.Errorf("health: %s is also page %q's path (locale %q); the endpoint would shadow it — move the endpoint with livePath/readyPath", path, page.Name, locale)
 				}
 			}
 		}
@@ -134,17 +108,17 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 func (o *Options) validate() error {
 	switch {
 	case !strings.HasPrefix(o.LivePath, "/"):
-		return fmt.Errorf(`elagoht/health: livePath %q must start with "/"`, o.LivePath)
+		return fmt.Errorf(`health: livePath %q must start with "/"`, o.LivePath)
 	case !strings.HasPrefix(o.ReadyPath, "/"):
-		return fmt.Errorf(`elagoht/health: readyPath %q must start with "/"`, o.ReadyPath)
+		return fmt.Errorf(`health: readyPath %q must start with "/"`, o.ReadyPath)
 	case o.LivePath == o.ReadyPath:
-		return fmt.Errorf("elagoht/health: livePath and readyPath are both %s", o.LivePath)
+		return fmt.Errorf("health: livePath and readyPath are both %s", o.LivePath)
 	case o.CheckTimeout < 0:
-		return errors.New("elagoht/health: checkTimeout must not be negative")
+		return errors.New("health: checkTimeout must not be negative")
 	case o.CacheFor < 0:
-		return errors.New("elagoht/health: cacheFor must not be negative")
+		return errors.New("health: cacheFor must not be negative")
 	case o.MaxInFlight < 0:
-		return fmt.Errorf("elagoht/health: maxInFlight %d must not be negative", o.MaxInFlight)
+		return fmt.Errorf("health: maxInFlight %d must not be negative", o.MaxInFlight)
 	}
 	return nil
 }

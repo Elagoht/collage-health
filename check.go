@@ -47,17 +47,17 @@ type flight struct {
 func (p *Plugin) Check(name string, fn func(context.Context) error) {
 	switch {
 	case name == "":
-		panic("elagoht/health: Check needs a name")
+		panic("health: Check needs a name")
 	case fn == nil:
-		panic(fmt.Sprintf("elagoht/health: Check %q has a nil function", name))
+		panic(fmt.Sprintf("health: Check %q has a nil function", name))
 	case p.inited.Load():
-		panic(fmt.Sprintf("elagoht/health: Check %q after Init; register checks before the application starts", name))
+		panic(fmt.Sprintf("health: Check %q after Init; register checks before the application starts", name))
 	}
 	c := &p.checks
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.names[name] {
-		panic(fmt.Sprintf("elagoht/health: Check %q registered twice", name))
+		panic(fmt.Sprintf("health: Check %q registered twice", name))
 	}
 	if c.names == nil {
 		c.names = map[string]bool{}
@@ -129,7 +129,7 @@ func (p *Plugin) run(list []check) map[string]bool {
 				err = fmt.Errorf("no answer within %s", timeout)
 			}
 			if err != nil && !errors.Is(err, errPanicked) {
-				p.logger.Warn("elagoht/health: check failed", "check", ch.name, "error", err)
+				p.logger.Warn("health: check failed", "check", ch.name, "error", err)
 			}
 			mu.Lock()
 			result[ch.name] = err == nil
@@ -147,7 +147,7 @@ var errPanicked = errors.New("panicked")
 func (p *Plugin) call(ctx context.Context, ch check) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
-			p.logger.Error("elagoht/health: check panicked", "check", ch.name, "panic", fmt.Sprint(v))
+			p.logger.Error("health: check panicked", "check", ch.name, "panic", fmt.Sprint(v))
 			err = errPanicked
 		}
 	}()

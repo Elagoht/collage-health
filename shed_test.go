@@ -142,7 +142,7 @@ func expectShed(t *testing.T, rec *httptest.ResponseRecorder) {
 // neither a refusal nor a panic leaks a slot.
 func TestShed_EndpointsExemptAndCounterBalanced(t *testing.T) {
 	hold := newHolder()
-	a := shedApp(t, health.NewWith(health.Options{MaxInFlight: 2}), hold)
+	a := shedApp(t, health.New(health.Options{MaxInFlight: 2}), hold)
 	if err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestShed_EndpointsExemptAndCounterBalanced(t *testing.T) {
 // With no cap nothing is counted or refused.
 func TestShed_Off(t *testing.T) {
 	hold := newHolder()
-	a := shedApp(t, health.New(), hold)
+	a := shedApp(t, health.New(health.Options{}), hold)
 	if err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestShed_Off(t *testing.T) {
 
 // Draining answers without running the checks.
 func TestCheck_NotRunWhileDraining(t *testing.T) {
-	p := health.New()
+	p := health.New(health.Options{})
 	var mu sync.Mutex
 	calls := 0
 	p.Check("counted", func(context.Context) error {

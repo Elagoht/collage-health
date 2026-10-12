@@ -14,15 +14,16 @@ go get github.com/Elagoht/collage-health
 app, err := collage.New(&collage.Config{
 	Server: collage.ServerConfig{DrainDelay: 5 * time.Second, ShutdownTimeout: 10 * time.Second},
 	Plugins: []collage.Plugin{
-		health.New(), // before anything that can refuse or answer a request
+		health.New(health.Options{}), // before anything that can refuse or answer a request
 		basicauth.New(basicauth.Options{}),
 		ratelimit.New(ratelimit.Options{}),
 	},
 })
 ```
 
-Requires collage v0.58.0 or later, which tells plugins a drain has started
-(`collage.DrainHook`) and has `ServerConfig.DrainDelay`.
+Requires collage v0.61.0 or later, which tells plugins a drain has started
+(`collage.DrainHook`), has `ServerConfig.DrainDelay`, and reads durations as
+`collage.Duration`.
 
 ## Where to list it
 
@@ -90,7 +91,7 @@ The middleware answers before routing, so the paths belong to the plugin:
 Register the application's own readiness checks before the application starts:
 
 ```go
-h := health.New()
+h := health.New(health.Options{})
 h.Check("db", func(ctx context.Context) error { return db.PingContext(ctx) })
 h.Check("cache", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
 ```
@@ -128,7 +129,7 @@ call after the application has started.
 
 A `Plugin` value serves one application. Starting a second application with the
 same value fails, since the value keeps the first one's drain and checks; build
-each with its own `health.New()`, in tests too.
+each with its own `health.New`, in tests too.
 
 ### Details
 
@@ -163,15 +164,15 @@ readiness endpoint is reachable from outside and the names say more than you wan
 Or from Go, as the defaults configuration starts from:
 
 ```go
-health.NewWith(health.Options{LivePath: "/live", ReadyPath: "/ready"})
+health.New(health.Options{LivePath: "/live", ReadyPath: "/ready"})
 ```
 
 | Option | JSON | Default | |
 | --- | --- | --- | --- |
 | `LivePath` | `livePath` | `"/healthz"` | The liveness endpoint |
 | `ReadyPath` | `readyPath` | `"/readyz"` | The readiness endpoint |
-| `CheckTimeout` | `checkTimeout` | `"2s"` | How long one check may run. A Go duration string, or nanoseconds |
-| `CacheFor` | `cacheFor` | `"1s"` | How long one readiness result is reused. A Go duration string, or nanoseconds |
+| `CheckTimeout` | `checkTimeout` | `"2s"` | How long one check may run. A Go duration string; a number is an error |
+| `CacheFor` | `cacheFor` | `"1s"` | How long one readiness result is reused. A Go duration string; a number is an error |
 | `Details` | `details` | `false` | A JSON readiness body naming each check as `ok` or `failing` |
 | `MaxInFlight` | `maxInFlight` | `0` | Requests served at once at most; `0` is no cap |
 
@@ -250,6 +251,20 @@ seconds with room to spare. Keep `terminationGracePeriodSeconds` above
 `DrainDelay + ShutdownTimeout`, or the pod is killed mid-shutdown.
 
 ## Changes
+
+### v0.2.0
+
+Changed in v0.2.0:
+
+- `New()` and `NewWith(opts)` are one constructor, `New(opts Options)`: write
+  `health.New(health.Options{})` for `New()`, and `health.New(opts)` for
+  `NewWith(opts)`.
+- `health.Duration` is gone; `Options.CheckTimeout` and `Options.CacheFor` are
+  `collage.Duration`. A duration written as a number — `"checkTimeout": 2`, which
+  was 2 nanoseconds and failed every check — now stops the application, naming
+  the key. Write `"2s"`.
+- Errors and log records start with `health:`, not `elagoht/health:`.
+- Requires collage v0.61.0.
 
 ### v0.1.1
 

@@ -9,37 +9,21 @@
     "description": "Package health answers liveness and readiness probes for a collage application, turns readiness false while the server drains, and can shed load past a cap on requests in flight.",
     "properties": {
       "cacheFor": {
+        "type": "string",
         "description": "how long one readiness result is reused, default \"1s\"",
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-            "examples": [
-              "30s",
-              "5m"
-            ]
-          },
-          {
-            "type": "integer",
-            "description": "nanoseconds"
-          }
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
         ]
       },
       "checkTimeout": {
+        "type": "string",
         "description": "per check, default \"2s\"",
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-            "examples": [
-              "30s",
-              "5m"
-            ]
-          },
-          {
-            "type": "integer",
-            "description": "nanoseconds"
-          }
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
         ]
       },
       "details": {

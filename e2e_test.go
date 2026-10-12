@@ -44,7 +44,7 @@ func TestExport_NoEndpoints(t *testing.T) {
 		Template: collage.TemplateConfig{FS: fstest.MapFS{
 			"t/p.html": {Data: []byte(`<main>home</main>`)},
 		}, Root: "t"},
-		Plugins: []collage.Plugin{health.NewWith(health.Options{MaxInFlight: 1}), hold, reader},
+		Plugins: []collage.Plugin{health.New(health.Options{MaxInFlight: 1}), hold, reader},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestE2E_DrainOverRealServer(t *testing.T) {
 		Template: collage.TemplateConfig{FS: fstest.MapFS{
 			"t/p.html": {Data: []byte(`<main>home</main>`)},
 		}, Root: "t"},
-		Plugins: []collage.Plugin{health.New()},
+		Plugins: []collage.Plugin{health.New(health.Options{})},
 	})
 	if err != nil {
 		t.Fatal(err)
