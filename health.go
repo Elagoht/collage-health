@@ -20,7 +20,7 @@ import (
 // Name is the plugin's name.
 const Name = "elagoht/health"
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 // Duration is a time.Duration that reads from configuration as Go writes one,
 // "2s", as well as a number of nanoseconds.

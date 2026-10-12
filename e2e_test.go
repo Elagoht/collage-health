@@ -64,11 +64,7 @@ func TestExport_NoEndpoints(t *testing.T) {
 	expectShed(t, do(h, http.MethodGet, "/a"))
 
 	dir := t.TempDir()
-	builder, err := collage.NewBuilder(app, collage.BuildOptions{OutDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := builder.Build(context.Background())
+	report, err := collage.Build(context.Background(), app, collage.BuildOptions{OutDir: dir})
 	release()
 	if err != nil {
 		t.Fatalf("Build: %v", err)
