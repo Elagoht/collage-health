@@ -2,17 +2,16 @@ package health_test
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	health "github.com/Elagoht/collage-health"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 // holder is a plugin listed after health, so its middleware runs inside health's.
@@ -70,27 +69,16 @@ func (h *holder) Init(_ context.Context, host collage.Host) error {
 // page at "/" and a page at "/boom" whose data handler panics.
 func shedApp(t *testing.T, p *health.Plugin, hold *holder) *collage.App {
 	t.Helper()
-	a, err := collage.New(&collage.Config{
-		Server: collage.ServerConfig{Host: "localhost", Port: 3000},
-		Logger: slog.New(slog.DiscardHandler),
-		Template: collage.TemplateConfig{FS: fstest.MapFS{
-			"t/p.html": {Data: []byte(`<main>home</main>`)},
-		}, Root: "t"},
-		Plugins: []collage.Plugin{p, hold},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Build()).WithPath("en", "/").Build()
 	boom := collage.NewPage("boom").WithContent(collage.NewFragment("boom", "p.html").WithData(
 		collage.Load(func(context.Context, *collage.RenderContext) (string, error) { panic("test: a data handler panicked") }),
 	).Build()).WithPath("en", "/boom").Build()
-	for _, page := range []*collage.Page{home, boom} {
-		if err := a.RegisterPage(page); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return a
+	return collagetest.NewSite(t,
+		collagetest.WithPlugins(p, hold),
+		collagetest.WithTemplates(map[string]string{"p.html": `<main>home</main>`}),
+		collagetest.WithoutHome(),
+		collagetest.WithRegister(home, boom),
+	).App
 }
 
 // holdN starts n requests in group, each to its own path, and waits until all
@@ -143,9 +131,6 @@ func expectShed(t *testing.T, rec *httptest.ResponseRecorder) {
 func TestShed_EndpointsExemptAndCounterBalanced(t *testing.T) {
 	hold := newHolder()
 	a := shedApp(t, health.New(health.Options{MaxInFlight: 2}), hold)
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
 	h := a.Handler()
 
 	// Two in, the cap reached.
@@ -181,9 +166,6 @@ func TestShed_EndpointsExemptAndCounterBalanced(t *testing.T) {
 func TestShed_Off(t *testing.T) {
 	hold := newHolder()
 	a := shedApp(t, health.New(health.Options{}), hold)
-	if err := a.Start(); err != nil {
-		t.Fatal(err)
-	}
 	h := a.Handler()
 	release := holdN(t, h, hold, "off", 10)
 
