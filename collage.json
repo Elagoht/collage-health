@@ -4,6 +4,7 @@
   "description": "Package health answers liveness and readiness probes for a collage application, turns readiness false while the server drains, and can shed load past a cap on requests in flight.",
   "repository": "https://github.com/Elagoht/collage-health",
   "order": -30,
+  "setup": "Works on its own: `/healthz` answers while the process runs, and `/readyz` turns 503 while a shutdown drains.\nTo hold readiness on a dependency, keep the plugin in a variable in `plugins.go` — `h := health.New(health.Options{})` — call `h.Check(\"db\", db.PingContext)`, and list `h`.",
   "config": {
     "type": "object",
     "description": "Package health answers liveness and readiness probes for a collage application, turns readiness false while the server drains, and can shed load past a cap on requests in flight.",

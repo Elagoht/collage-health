@@ -20,7 +20,7 @@ import (
 // Name is the plugin's name.
 const Name = "elagoht/health"
 
-const version = "0.2.0"
+const version = "0.2.1"
 
 // Options configures the plugin.
 type Options struct {
